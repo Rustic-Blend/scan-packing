@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1"><title>Scan Packing</title><meta charset="utf-8">
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,Roboto,sans-serif;background:#1e1611;color:#fff;height:100vh;display:flex;flex-direction:column}
+.top{background:#2b1d14;padding:10px 14px;font-weight:600;display:flex;justify-content:space-between;align-items:center}
+.top button{background:none;border:0;color:#cbb;font-size:13px}
+#cam{flex:1;position:relative;background:#222;overflow:hidden;min-height:200px}
+#cam video{width:100%;height:100%;object-fit:cover}
+#kotak{position:absolute;left:10%;right:10%;top:40%;height:20%;border:3px solid #fff;border-radius:8px;pointer-events:none}
+#info{position:absolute;bottom:8px;width:100%;text-align:center;font-size:13px;opacity:.85}
+#hasil{padding:16px;text-align:center;min-height:120px;background:#3a2c22}
+#hasil b{display:block;font-size:24px}#hasil .no{font-family:monospace;font-size:20px}
+#hasil small{display:block;margin-top:4px;font-size:14px}
+.ok{background:#1f9d55!important}.dua{background:#e8a317!important;color:#2b1d14}.tolak{background:#d63a2f!important}
+.bawah{display:flex;gap:8px;padding:8px}
+.bawah button,.bawah label{flex:1;padding:12px;border:0;border-radius:10px;background:#f2ece6;color:#2b1d14;font-size:15px;text-align:center}
+#ketik{position:absolute;left:-999px;opacity:0}
+.foot{padding:8px 14px;font-size:13px;color:#cbb;display:flex;justify-content:space-between}
+#pinBox{position:fixed;inset:0;background:#1e1611;display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px}
+#pinBox input{font-size:28px;width:180px;text-align:center;padding:8px;border-radius:10px;border:0}
+#pinBox button{font-size:18px;padding:10px 30px;border-radius:10px;border:0;background:#1f9d55;color:#fff}
+</style></head><body>
+<div class="top"><span>📦 Scan Packing</span><button onclick="gantiPin()">ganti PIN</button></div>
+<div id="cam"><video id="vid" playsinline muted></video><div id="kotak"></div><div id="info">Menyalakan kamera…</div></div>
+<div id="hasil"><small>Scan barcode resi yang sudah dicetak</small></div>
+<div class="bawah">
+  <button onclick="manual()">⌨️ Ketik resi</button>
+  <label>📷 Foto barcode<input id="foto" type="file" accept="image/*" capture="environment" hidden></label>
+</div>
+<div class="foot"><span>Hari ini: <b id="nPack">-</b> dipacking</span><span>sisa <b id="nSisa">-</b></span></div>
+<input id="ketik" inputmode="none" autocomplete="off">
+<div id="pinBox"><div>Masukkan PIN gudang</div><input id="pin" type="password" inputmode="numeric"><button onclick="simpanPin()">Masuk</button><div id="pinErr" style="color:#f88"></div></div>
+
+<script>
+// --- pengganti google.script.run (halaman di luar Apps Script) ---
+var API_SCAN = 'https://script.google.com/macros/s/AKfycbwE0yCieSPVoF0-X28mnET6vEb0RAXeDfMqE8BG7bZsG13Ol7XEx5_X8qNMwtlNHekcMA/exec';
+function panggilServer(fn, args) {
+  return fetch(API_SCAN, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify({ fn: fn, args: args }) })
+    .then(function (r) { return r.json(); })
+    .then(function (j) { if (j.error) throw new Error(j.error); return j.hasil; });
+}
+function pelari(s, f) {
+  return new Proxy({}, { get: function (_, k) {
+    if (k === 'withSuccessHandler') return function (x) { return pelari(x, f); };
+    if (k === 'withFailureHandler') return function (x) { return pelari(s, x); };
+    return function () {
+      panggilServer(k, [].slice.call(arguments))
+        .then(function (h) { if (s) s(h); }, function (e) { if (f) f(e); });
+    };
+  } });
+}
+var google = { script: { run: pelari(null, null) } };
+
+var PIN = ''; try { PIN = localStorage.getItem('pinGudang') || ''; } catch (e) {}
+var sibuk = false, terakhir = '', waktuTerakhir = 0, detektor = null, html5 = null;
+var $ = function (id) { return document.getElementById(id); };
+
+function gantiPin() { try { localStorage.removeItem('pinGudang'); } catch (e) {} PIN = ''; $('pinBox').style.display = 'flex'; }
+function simpanPin() {
+  var p = $('pin').value.trim();
+  google.script.run.withSuccessHandler(function () {
+    PIN = p; try { localStorage.setItem('pinGudang', p); } catch (e) {}
+    $('pinBox').style.display = 'none'; $('pinErr').textContent = ''; mulai();
+  }).withFailureHandler(function (e) { $('pinErr').textContent = (e && e.message) || 'PIN salah'; }).cekPin(p);
+}
+
+// ---- bunyi & getar ----
+var ac = null;
+function bunyi(nada) {
+  try {
+    ac = ac || new (window.AudioContext || window.webkitAudioContext)();
+    nada.forEach(function (n, i) {
+      var o = ac.createOscillator(), g = ac.createGain();
+      o.frequency.value = n[0]; o.type = n[0] < 400 ? 'square' : 'sine';
+      o.connect(g); g.connect(ac.destination);
+      var t = ac.currentTime + i * 0.18; g.gain.setValueAtTime(0.4, t);
+      o.start(t); o.stop(t + n[1]);
+    });
+  } catch (e) {}
+}
+function getar(p) { try { navigator.vibrate && navigator.vibrate(p); } catch (e) {} }
+
+function tampil(r) {
+  var h = $('hasil'); h.className = r.hasil;
+  var judul = { ok: '✓ SUDAH DIPACKING', dua: '! SUDAH DI-SCAN', tolak: '✕ JANGAN DIKIRIM' }[r.hasil] || r.hasil;
+  var ket = r.pesan || '';
+  if (r.hasil === 'dua') ket += ' — cek, jangan dikirim dobel';
+  if (r.hasil === 'tolak') ket += ' — serahkan ke admin';
+  h.innerHTML = '<b></b><span class="no"></span><small></small>';
+  h.querySelector('b').textContent = judul;
+  h.querySelector('.no').textContent = r.resi || '';
+  h.querySelector('small').textContent = (r.kurir ? r.kurir + ' · ' : '') + ket;
+  if (r.hasil === 'ok') { bunyi([[1500, 0.15]]); getar(80); }
+  else if (r.hasil === 'dua') { bunyi([[700, 0.2]]); getar([200, 100, 200]); }
+  else { bunyi([[250, 0.15], [250, 0.15], [250, 0.15]]); getar([400, 100, 400]); }
+}
+
+function kirim(kode) {
+  kode = String(kode || '').trim();
+  if (!kode || sibuk) return;
+  var now = Date.now();
+  if (kode === terakhir && now - waktuTerakhir < 4000) return; // kamera membaca barcode yg sama berkali-kali
+  terakhir = kode; waktuTerakhir = now; sibuk = true;
+  $('hasil').className = ''; $('hasil').innerHTML = '<small>Mengecek ' + kode.replace(/[<>&]/g, '') + '…</small>';
+  google.script.run.withSuccessHandler(function (r) { sibuk = false; tampil(r); muatRingkasan(); })
+    .withFailureHandler(function (e) {
+      sibuk = false; terakhir = '';
+      if (String(e).indexOf('PIN') >= 0) return gantiPin();
+      tampil({ hasil: 'tolak', resi: kode, pesan: 'Gagal kirim (internet?) — scan ulang' });
+    }).tandaiPacking(PIN, kode);
+}
+function muatRingkasan() {
+  google.script.run.withSuccessHandler(function (s) { $('nPack').textContent = s.dipacking; $('nSisa').textContent = s.sisa; }).ringkasan(PIN);
+}
+function manual() { var k = prompt('Ketik nomor resi'); if (k) { terakhir = ''; kirim(k); } }
+
+// ---- scanner tembak (keyboard): ketik + Enter ----
+$('ketik').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter') { var v = this.value; this.value = ''; terakhir = ''; kirim(v); }
+});
+setInterval(function () { if (document.activeElement.tagName !== 'INPUT' || document.activeElement.id === 'ketik') $('ketik').focus(); }, 1000);
+
+// ---- foto barcode (cadangan bila kamera langsung tidak bisa) ----
+$('foto').addEventListener('change', function () {
+  var f = this.files[0]; this.value = ''; if (!f) return;
+  if (detektor) {
+    createImageBitmap(f).then(function (b) { return detektor.detect(b); })
+      .then(function (r) { r.length ? kirim(r[0].rawValue) : tampil({ hasil: 'tolak', pesan: 'Barcode tidak terbaca, foto lebih dekat' }); });
+  } else if (window.Html5Qrcode) {
+    new Html5Qrcode('tmpQr').scanFile(f, false).then(kirim)
+      .catch(function () { tampil({ hasil: 'tolak', pesan: 'Barcode tidak terbaca, foto lebih dekat' }); });
+  }
+});
+
+// ---- kamera langsung ----
+function mulaiKamera() {
+  var FORMAT = ['code_128', 'code_39', 'ean_13', 'qr_code'];
+  if ('BarcodeDetector' in window) {
+    detektor = new BarcodeDetector({ formats: FORMAT });
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 } } })
+      .then(function (s) {
+        var v = $('vid'); v.srcObject = s; v.play(); $('info').textContent = 'Arahkan ke barcode resi';
+        (function loop() {
+          if (v.readyState >= 2 && !sibuk) detektor.detect(v).then(function (r) { if (r.length) kirim(r[0].rawValue); }).catch(function () {});
+          setTimeout(loop, 250);
+        })();
+      }).catch(kameraGagal);
+  } else {
+    var s = document.createElement('script');
+    s.src = 'https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js';
+    s.onload = function () {
+      $('vid').style.display = 'none';
+      var d = document.createElement('div'); d.id = 'qr'; d.style.width = '100%'; $('cam').prepend(d);
+      var t = document.createElement('div'); t.id = 'tmpQr'; t.style.display = 'none'; document.body.appendChild(t);
+      html5 = new Html5Qrcode('qr');
+      html5.start({ facingMode: 'environment' }, { fps: 8, qrbox: { width: 260, height: 110 } }, kirim)
+        .then(function () { $('info').textContent = 'Arahkan ke barcode resi'; }).catch(kameraGagal);
+    };
+    s.onerror = kameraGagal; document.head.appendChild(s);
+  }
+}
+function kameraGagal() { $('info').textContent = 'Kamera tidak bisa dibuka. Pakai 📷 Foto barcode atau scanner tembak.'; }
+
+function mulai() { muatRingkasan(); mulaiKamera(); setInterval(muatRingkasan, 60000); }
+if (PIN) {
+  google.script.run.withSuccessHandler(mulai).withFailureHandler(gantiPin).cekPin(PIN);
+} else gantiPin();
+</script>
+</body></html>
