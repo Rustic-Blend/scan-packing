@@ -131,18 +131,49 @@ function gambarRiwayat() {
   }
 }
 
-function kirim(kode) {
+// Claude (13 Nov, watchdog): scan dari alat/ketik saat HP masih menunggu jawaban dulu DIBUANG diam-diam
+// (resi tidak tercatat dan tidak dicek). Kini diantre. Jawaban yang tidak datang 30 dtk = gagal (HP tidak
+// nyangkut "Mengecek…"). Kiriman yang "gagal" bisa saja sudah tercatat di Sheet: scan ulang lalu dijawab
+// "sudah di-scan" -> ditampilkan hijau, bukan kuning "jangan dikirim dobel".
+var antre = [], nomorKirim = 0, gagalBaru = {};
+function lanjutAntre() { if (!sibuk && antre.length) kirim(antre.shift(), true); }
+function kirim(kode, dariAlat) {
   kode = String(kode || '').trim();
-  if (!kode || sibuk) return;
+  if (!kode) return;
+  if (sibuk) {
+    if (dariAlat && antre.indexOf(kode) < 0) antre.push(kode);
+    return;
+  }
   var now = Date.now();
-  if (kode === terakhir && now - waktuTerakhir < 4000) return;
+  if (kode === terakhir && now - waktuTerakhir < 4000) return lanjutAntre();
   terakhir = kode; waktuTerakhir = now; sibuk = true;
-  var h = $('hasil'); h.className = ''; h.innerHTML = '<small></small>'; h.firstChild.textContent = 'Mengecek ' + kode + '…';
-  google.script.run.withSuccessHandler(function (r) { sibuk = false; tampil(r); muatRingkasan(); })
+  var id = ++nomorKirim;
+  var h = $('hasil'); h.className = ''; h.innerHTML = '<small></small>';
+  h.firstChild.textContent = 'Mengecek ' + kode + '…' + (antre.length ? ' (antre ' + antre.length + ')' : '');
+  var gagal = function (pesan) {
+    if (id !== nomorKirim || !sibuk) return;
+    sibuk = false; terakhir = ''; gagalBaru[kode] = Date.now();
+    tampil({ hasil: 'tolak', resi: kode, pesan: pesan });
+    lanjutAntre();
+  };
+  var batas = setTimeout(function () { gagal('Tidak ada jawaban (internet?) — scan ulang'); }, 30000);
+  google.script.run.withSuccessHandler(function (r) {
+      clearTimeout(batas);
+      if (id !== nomorKirim || !sibuk) { muatRingkasan(); return; }
+      sibuk = false;
+      if (r && r.hasil === 'dua' && gagalBaru[kode] && Date.now() - gagalBaru[kode] < 600000) {
+        r.hasil = 'ok'; r.pesan = 'Sudah tercatat (kiriman sebelumnya ternyata masuk)';
+      }
+      if (r && r.hasil !== 'tolak') delete gagalBaru[kode];
+      tampil(r); muatRingkasan(); lanjutAntre();
+    })
     .withFailureHandler(function (e) {
-      sibuk = false; terakhir = '';
-      if (String(e && e.message || e).indexOf('PIN') >= 0) return gantiPin();
-      tampil({ hasil: 'tolak', resi: kode, pesan: 'Gagal kirim (internet?) — scan ulang' });
+      clearTimeout(batas);
+      if (String(e && e.message || e).indexOf('PIN') >= 0) {
+        if (id === nomorKirim) { sibuk = false; terakhir = ''; }
+        return gantiPin();
+      }
+      gagal('Gagal kirim (internet?) — scan ulang');
     }).tandaiPacking(PIN, kode);
 }
 function muatRingkasan() {
@@ -155,11 +186,11 @@ function muatRingkasan() {
     $('nBesar').textContent = s.dipacking;
   }).ringkasan(PIN);
 }
-function manual() { var k = prompt('Ketik nomor resi'); if (k) { terakhir = ''; kirim(k); } }
+function manual() { var k = prompt('Ketik nomor resi'); if (k) { terakhir = ''; kirim(k, true); } }
 
 // ---- alat scan (keyboard): ketik + Enter ----
 $('ketik').addEventListener('keydown', function (e) {
-  if (e.key === 'Enter') { var v = this.value; this.value = ''; terakhir = ''; kirim(v); }
+  if (e.key === 'Enter') { var v = this.value; this.value = ''; terakhir = ''; kirim(v, true); }
 });
 setInterval(function () {
   var a = document.activeElement;
@@ -226,8 +257,11 @@ function terapkanMode() {
 function gantiMode() { MODE = MODE === 'alat' ? 'kamera' : 'alat'; simpan('modeScan', MODE); terapkanMode(); $('ketik').focus(); }
 
 function mulai() {
-  sudahMulai = true; muatRingkasan(); setInterval(muatRingkasan, 60000);
-  if (MODE === 'kamera') nyalakanKamera();
+  // PIN diminta ulang (mis. PIN diganti) memanggil mulai() lagi: jangan pasang timer & kamera dobel.
+  var pertama = !sudahMulai;
+  sudahMulai = true; muatRingkasan();
+  if (pertama) setInterval(muatRingkasan, 60000);
+  if (MODE === 'kamera' && !stream && !html5) nyalakanKamera();
 }
 gambarRiwayat(); terapkanMode();
 if (PIN) google.script.run.withSuccessHandler(mulai).withFailureHandler(gantiPin).cekPin(PIN);
